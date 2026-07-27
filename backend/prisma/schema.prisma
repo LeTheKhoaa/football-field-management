@@ -1,0 +1,161 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url = env("DATABASE_URL")
+}
+
+enum FieldStatus {
+  ACTIVE
+  MAINTENANCE
+  INACTIVE
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  E_WALLET
+}
+
+model FieldType {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?  @db.Text
+  fields      Field[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("field_types")
+}
+
+model Field {
+  id           Int           @id @default(autoincrement())
+  code         String        @unique
+  name         String
+  description  String?       @db.Text
+  imageUrl     String?
+  status       FieldStatus   @default(ACTIVE)
+  fieldTypeId  Int
+  fieldType    FieldType     @relation(fields: [fieldTypeId], references: [id])
+  prices       FieldPrice[]
+  bookingItems BookingItem[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([fieldTypeId])
+  @@map("fields")
+}
+
+model TimeSlot {
+  id           Int           @id @default(autoincrement())
+  name         String
+  startTime    String
+  endTime      String
+  isActive     Boolean       @default(true)
+  prices       FieldPrice[]
+  bookingItems BookingItem[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([startTime, endTime])
+  @@map("time_slots")
+}
+
+model FieldPrice {
+  id         Int      @id @default(autoincrement())
+  fieldId    Int
+  timeSlotId Int
+  price      Decimal  @db.Decimal(12, 2)
+  field      Field    @relation(fields: [fieldId], references: [id])
+  timeSlot   TimeSlot @relation(fields: [timeSlotId], references: [id])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([fieldId, timeSlotId])
+  @@index([timeSlotId])
+  @@map("field_prices")
+}
+
+model Customer {
+  id        Int       @id @default(autoincrement())
+  fullName  String
+  phone     String    @unique
+  email     String?
+  address   String?
+  bookings  Booking[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("customers")
+}
+
+model Booking {
+  id                 Int           @id @default(autoincrement())
+  bookingCode        String        @unique
+  customerId         Int
+  customer           Customer      @relation(fields: [customerId], references: [id])
+  status             BookingStatus @default(PENDING)
+  paymentStatus      PaymentStatus @default(UNPAID)
+  totalAmount        Decimal       @default(0) @db.Decimal(12, 2)
+  depositAmount      Decimal       @default(0) @db.Decimal(12, 2)
+  note               String?       @db.Text
+  cancellationReason String?       @db.Text
+  items              BookingItem[]
+  payments           Payment[]
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  @@index([customerId])
+  @@index([status])
+  @@map("bookings")
+}
+
+model BookingItem {
+  id         Int      @id @default(autoincrement())
+  bookingId  Int
+  fieldId    Int
+  timeSlotId Int
+  playDate   DateTime @db.Date
+  unitPrice  Decimal  @db.Decimal(12, 2)
+  booking    Booking  @relation(fields: [bookingId], references: [id])
+  field      Field    @relation(fields: [fieldId], references: [id])
+  timeSlot   TimeSlot @relation(fields: [timeSlotId], references: [id])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([fieldId, timeSlotId, playDate])
+  @@index([bookingId])
+  @@index([timeSlotId])
+  @@map("booking_items")
+}
+
+model Payment {
+  id              Int           @id @default(autoincrement())
+  bookingId       Int
+  amount          Decimal       @db.Decimal(12, 2)
+  method          PaymentMethod
+  transactionCode String?
+  note            String?       @db.Text
+  paidAt          DateTime      @default(now())
+  booking         Booking       @relation(fields: [bookingId], references: [id])
+  createdAt       DateTime      @default(now())
+
+  @@index([bookingId])
+  @@map("payments")
+}
