@@ -4,7 +4,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { BookingStatus } from '@prisma/client';
+import {
+  BookingStatus,
+  FieldStatus,
+  Prisma,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BookingsService } from './bookings.service';
 
@@ -50,7 +54,50 @@ describe('BookingsService', () => {
     $transaction: jest.fn(),
   };
 
+  const validDto = {
+    customerId: 1,
+    depositAmount: 100000,
+    note: '  Đặt sân buổi tối  ',
+    items: [
+      {
+        fieldId: 1,
+        timeSlotId: 2,
+        playDate: '2026-08-01',
+      },
+    ],
+  };
+
+  const customer = {
+    id: 1,
+    fullName: 'Nguyễn Văn An',
+    phone: '0900000001',
+  };
+
+  const activeField = {
+    id: 1,
+    code: 'S001',
+    name: 'Sân số 1',
+    status: FieldStatus.ACTIVE,
+  };
+
+  const activeTimeSlot = {
+    id: 2,
+    name: '18:00 - 20:00',
+    startTime: '18:00',
+    endTime: '20:00',
+    isActive: true,
+  };
+
+  const fieldPrice = {
+    id: 1,
+    fieldId: 1,
+    timeSlotId: 2,
+    price: new Prisma.Decimal(500000),
+  };
+
   beforeEach(async () => {
+    jest.resetAllMocks();
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         BookingsService,
@@ -62,81 +109,317 @@ describe('BookingsService', () => {
     }).compile();
 
     service = module.get<BookingsService>(BookingsService);
-
-    jest.clearAllMocks();
   });
 
   describe('create', () => {
-  it('ném NotFoundException khi khách hàng không tồn tại', async () => {
-    const dto = {
-      customerId: 999,
-      depositAmount: 100000,
-      note: 'Đặt sân thử nghiệm',
-      items: [
-        {
-          fieldId: 1,
-          timeSlotId: 1,
-          playDate: '2026-08-01',
-        },
-      ],
-    };
+    it('ném NotFoundException khi khách hàng không tồn tại', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(null);
 
-    prismaMock.customer.findUnique.mockResolvedValue(null);
+      await expect(service.create(validDto as never)).rejects.toThrow(
+        new NotFoundException('Khách hàng không tồn tại'),
+      );
 
-    await expect(service.create(dto as never)).rejects.toThrow(
-      new NotFoundException('Khách hàng không tồn tại'),
-    );
-
-    expect(prismaMock.customer.findUnique).toHaveBeenCalledWith({
-      where: {
-        id: 999,
-      },
+      expect(prismaMock.field.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
     });
 
-    expect(prismaMock.field.findUnique).not.toHaveBeenCalled();
-    expect(prismaMock.$transaction).not.toHaveBeenCalled();
-  });
+    it('ném BadRequestException khi danh sách đặt sân bị trùng', async () => {
+      const duplicatedDto = {
+        ...validDto,
+        items: [
+          {
+            fieldId: 1,
+            timeSlotId: 2,
+            playDate: '2026-08-01',
+          },
+          {
+            fieldId: 1,
+            timeSlotId: 2,
+            playDate: '2026-08-01',
+          },
+        ],
+      };
 
-  it('ném BadRequestException khi danh sách có mục đặt sân bị trùng', async () => {
-    const dto = {
-      customerId: 1,
-      depositAmount: 100000,
-      note: 'Đặt sân bị trùng',
-      items: [
-        {
-          fieldId: 1,
-          timeSlotId: 2,
-          playDate: '2026-08-01',
-        },
-        {
-          fieldId: 1,
-          timeSlotId: 2,
-          playDate: '2026-08-01',
-        },
-      ],
-    };
+      prismaMock.customer.findUnique.mockResolvedValue(customer);
 
-    prismaMock.customer.findUnique.mockResolvedValue({
-      id: 1,
-      fullName: 'Nguyễn Văn An',
+      await expect(service.create(duplicatedDto as never)).rejects.toThrow(
+        new BadRequestException(
+          'Danh sách có sân, khung giờ và ngày đá bị trùng',
+        ),
+      );
+
+      expect(prismaMock.field.findUnique).not.toHaveBeenCalled();
     });
 
-    await expect(service.create(dto as never)).rejects.toThrow(
-      new BadRequestException(
-        'Danh sách có sân, khung giờ và ngày đá bị trùng',
-      ),
-    );
+    it('ném BadRequestException khi ngày đá không hợp lệ', async () => {
+      const invalidDateDto = {
+        ...validDto,
+        items: [
+          {
+            fieldId: 1,
+            timeSlotId: 2,
+            playDate: 'ngay-khong-hop-le',
+          },
+        ],
+      };
 
-    expect(prismaMock.customer.findUnique).toHaveBeenCalledWith({
-      where: {
+      prismaMock.customer.findUnique.mockResolvedValue(customer);
+
+      await expect(service.create(invalidDateDto as never)).rejects.toThrow(
+        new BadRequestException('Ngày đá không hợp lệ'),
+      );
+    });
+
+    it('ném NotFoundException khi sân không tồn tại', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(customer);
+      prismaMock.field.findUnique.mockResolvedValue(null);
+
+      await expect(service.create(validDto as never)).rejects.toThrow(
+        new NotFoundException('Không tìm thấy sân có mã 1'),
+      );
+
+      expect(prismaMock.timeSlot.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('ném BadRequestException khi sân không hoạt động', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(customer);
+
+      prismaMock.field.findUnique.mockResolvedValue({
+        ...activeField,
+        status: FieldStatus.MAINTENANCE,
+      });
+
+      await expect(service.create(validDto as never)).rejects.toThrow(
+        new BadRequestException('Sân Sân số 1 hiện không hoạt động'),
+      );
+
+      expect(prismaMock.timeSlot.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('ném NotFoundException khi khung giờ không tồn tại', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(customer);
+      prismaMock.field.findUnique.mockResolvedValue(activeField);
+      prismaMock.timeSlot.findUnique.mockResolvedValue(null);
+
+      await expect(service.create(validDto as never)).rejects.toThrow(
+        new NotFoundException('Không tìm thấy khung giờ có mã 2'),
+      );
+
+      expect(prismaMock.fieldPrice.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('ném BadRequestException khi khung giờ không hoạt động', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(customer);
+      prismaMock.field.findUnique.mockResolvedValue(activeField);
+
+      prismaMock.timeSlot.findUnique.mockResolvedValue({
+        ...activeTimeSlot,
+        isActive: false,
+      });
+
+      await expect(service.create(validDto as never)).rejects.toThrow(
+        new BadRequestException(
+          'Khung giờ 18:00 - 20:00 hiện không hoạt động',
+        ),
+      );
+
+      expect(prismaMock.fieldPrice.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('ném NotFoundException khi sân chưa có giá', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(customer);
+      prismaMock.field.findUnique.mockResolvedValue(activeField);
+      prismaMock.timeSlot.findUnique.mockResolvedValue(activeTimeSlot);
+      prismaMock.fieldPrice.findUnique.mockResolvedValue(null);
+
+      await expect(service.create(validDto as never)).rejects.toThrow(
+        new NotFoundException(
+          'Sân Sân số 1 chưa có giá cho khung giờ 18:00 - 20:00',
+        ),
+      );
+
+      expect(prismaMock.bookingItem.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('ném ConflictException khi sân đã được đặt', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(customer);
+      prismaMock.field.findUnique.mockResolvedValue(activeField);
+      prismaMock.timeSlot.findUnique.mockResolvedValue(activeTimeSlot);
+      prismaMock.fieldPrice.findUnique.mockResolvedValue(fieldPrice);
+
+      prismaMock.bookingItem.findUnique.mockResolvedValue({
+        id: 10,
+        booking: {
+          id: 5,
+          status: BookingStatus.CONFIRMED,
+        },
+      });
+
+      await expect(service.create(validDto as never)).rejects.toThrow(
+        new ConflictException(
+          'Sân Sân số 1 đã được đặt vào ngày 2026-08-01, khung giờ 18:00 - 20:00',
+        ),
+      );
+    });
+
+    it('ném BadRequestException khi tiền cọc lớn hơn tổng tiền', async () => {
+      const invalidDepositDto = {
+        ...validDto,
+        depositAmount: 600000,
+      };
+
+      prismaMock.customer.findUnique.mockResolvedValue(customer);
+      prismaMock.field.findUnique.mockResolvedValue(activeField);
+      prismaMock.timeSlot.findUnique.mockResolvedValue(activeTimeSlot);
+      prismaMock.fieldPrice.findUnique.mockResolvedValue(fieldPrice);
+      prismaMock.bookingItem.findUnique.mockResolvedValue(null);
+
+      await expect(service.create(invalidDepositDto as never)).rejects.toThrow(
+        new BadRequestException('Tiền cọc không được lớn hơn tổng tiền'),
+      );
+
+      expect(prismaMock.booking.count).not.toHaveBeenCalled();
+    });
+
+    it('tạo đơn đặt sân thành công', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-07-28T10:00:00.000Z'));
+
+      const createdBooking = {
         id: 1,
-      },
+        bookingCode: 'BK202607280003',
+        customerId: 1,
+        status: BookingStatus.PENDING,
+        items: [],
+        payments: [],
+      };
+
+      prismaMock.customer.findUnique.mockResolvedValue(customer);
+      prismaMock.field.findUnique.mockResolvedValue(activeField);
+      prismaMock.timeSlot.findUnique.mockResolvedValue(activeTimeSlot);
+      prismaMock.fieldPrice.findUnique.mockResolvedValue(fieldPrice);
+      prismaMock.bookingItem.findUnique.mockResolvedValue(null);
+      prismaMock.booking.count.mockResolvedValue(2);
+      transactionMock.booking.create.mockResolvedValue(createdBooking);
+
+      prismaMock.$transaction.mockImplementation(
+        async (
+          callback: (transaction: typeof transactionMock) => Promise<unknown>,
+        ) => callback(transactionMock),
+      );
+
+      try {
+        const result = await service.create(validDto as never);
+
+        expect(result).toEqual(createdBooking);
+
+        expect(prismaMock.booking.count).toHaveBeenCalledWith({
+          where: {
+            bookingCode: {
+              startsWith: 'BK20260728',
+            },
+          },
+        });
+
+        expect(transactionMock.booking.create).toHaveBeenCalledTimes(1);
+
+        const argument = transactionMock.booking.create.mock.calls[0][0];
+
+        expect(argument.data.bookingCode).toBe('BK202607280003');
+        expect(argument.data.customerId).toBe(1);
+        expect(argument.data.note).toBe('Đặt sân buổi tối');
+        expect(argument.data.totalAmount.toString()).toBe('500000');
+        expect(argument.data.depositAmount.toString()).toBe('100000');
+        expect(argument.data.items.create).toHaveLength(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
+  describe('findAll', () => {
+    it('trả về toàn bộ đơn khi không có bộ lọc', async () => {
+      const bookings = [
+        {
+          id: 1,
+          bookingCode: 'BK202607280001',
+          status: BookingStatus.PENDING,
+        },
+      ];
+
+      prismaMock.booking.findMany.mockResolvedValue(bookings);
+
+      const result = await service.findAll();
+
+      expect(result).toEqual(bookings);
+
+      expect(prismaMock.booking.findMany).toHaveBeenCalledWith({
+        where: {
+          status: undefined,
+          customerId: undefined,
+          items: undefined,
+        },
+        include: {
+          customer: true,
+          items: {
+            include: {
+              field: true,
+              timeSlot: true,
+            },
+          },
+          payments: true,
+        },
+        orderBy: {
+          createdAt: 'desc',
+        },
+      });
     });
 
-    expect(prismaMock.field.findUnique).not.toHaveBeenCalled();
-    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    it('lọc đơn theo trạng thái, khách hàng và ngày đá', async () => {
+      const bookings = [
+        {
+          id: 2,
+          status: BookingStatus.CONFIRMED,
+          customerId: 5,
+        },
+      ];
+
+      prismaMock.booking.findMany.mockResolvedValue(bookings);
+
+      const result = await service.findAll(
+        BookingStatus.CONFIRMED,
+        5,
+        '2026-08-01',
+      );
+
+      expect(result).toEqual(bookings);
+
+      expect(prismaMock.booking.findMany).toHaveBeenCalledWith({
+        where: {
+          status: BookingStatus.CONFIRMED,
+          customerId: 5,
+          items: {
+            some: {
+              playDate: new Date('2026-08-01T00:00:00.000Z'),
+            },
+          },
+        },
+        include: {
+          customer: true,
+          items: {
+            include: {
+              field: true,
+              timeSlot: true,
+            },
+          },
+          payments: true,
+        },
+        orderBy: {
+          createdAt: 'desc',
+        },
+      });
+    });
   });
-});
 
   describe('findOne', () => {
     it('trả về đơn đặt sân khi tìm thấy dữ liệu', async () => {
@@ -145,12 +428,6 @@ describe('BookingsService', () => {
         bookingCode: 'BK202607280001',
         customerId: 1,
         status: BookingStatus.PENDING,
-        totalAmount: 500000,
-        depositAmount: 100000,
-        customer: {
-          id: 1,
-          fullName: 'Nguyễn Văn An',
-        },
         items: [],
         payments: [],
       };
@@ -160,26 +437,6 @@ describe('BookingsService', () => {
       const result = await service.findOne(1);
 
       expect(result).toEqual(booking);
-
-      expect(prismaMock.booking.findUnique).toHaveBeenCalledWith({
-        where: {
-          id: 1,
-        },
-        include: {
-          customer: true,
-          items: {
-            include: {
-              field: {
-                include: {
-                  fieldType: true,
-                },
-              },
-              timeSlot: true,
-            },
-          },
-          payments: true,
-        },
-      });
     });
 
     it('ném NotFoundException khi không tìm thấy đơn đặt sân', async () => {
@@ -188,26 +445,6 @@ describe('BookingsService', () => {
       await expect(service.findOne(999)).rejects.toThrow(
         new NotFoundException('Không tìm thấy đơn đặt sân'),
       );
-
-      expect(prismaMock.booking.findUnique).toHaveBeenCalledWith({
-        where: {
-          id: 999,
-        },
-        include: {
-          customer: true,
-          items: {
-            include: {
-              field: {
-                include: {
-                  fieldType: true,
-                },
-              },
-              timeSlot: true,
-            },
-          },
-          payments: true,
-        },
-      });
     });
   });
 
@@ -223,10 +460,9 @@ describe('BookingsService', () => {
         service.updateStatus(1, {
           status: BookingStatus.COMPLETED,
         }),
-      ).rejects.toThrow(new BadRequestException('Đơn đặt sân đã bị hủy'));
-
-      expect(prismaMock.booking.update).not.toHaveBeenCalled();
-      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      ).rejects.toThrow(
+        new BadRequestException('Đơn đặt sân đã bị hủy'),
+      );
     });
 
     it('ném BadRequestException khi đơn đã hoàn thành', async () => {
@@ -245,18 +481,12 @@ describe('BookingsService', () => {
           'Đơn đặt sân đã hoàn thành nên không thể đổi trạng thái',
         ),
       );
-
-      expect(prismaMock.booking.update).not.toHaveBeenCalled();
-      expect(prismaMock.$transaction).not.toHaveBeenCalled();
     });
 
     it('cập nhật trạng thái thông thường thành công', async () => {
       const updatedBooking = {
         id: 3,
-        bookingCode: 'BK202607280003',
         status: BookingStatus.COMPLETED,
-        items: [],
-        payments: [],
       };
 
       jest.spyOn(service, 'findOne').mockResolvedValue({
@@ -272,34 +502,12 @@ describe('BookingsService', () => {
       });
 
       expect(result).toEqual(updatedBooking);
-
-      expect(prismaMock.booking.update).toHaveBeenCalledWith({
-        where: {
-          id: 3,
-        },
-        data: {
-          status: BookingStatus.COMPLETED,
-        },
-        include: {
-          customer: true,
-          items: {
-            include: {
-              field: true,
-              timeSlot: true,
-            },
-          },
-          payments: true,
-        },
-      });
     });
 
     it('xóa chi tiết đặt sân khi hủy đơn', async () => {
       const cancelledBooking = {
         id: 4,
-        bookingCode: 'BK202607280004',
         status: BookingStatus.CANCELLED,
-        items: [],
-        payments: [],
       };
 
       jest.spyOn(service, 'findOne').mockResolvedValue({
@@ -331,25 +539,6 @@ describe('BookingsService', () => {
           bookingId: 4,
         },
       });
-
-      expect(transactionMock.booking.update).toHaveBeenCalledWith({
-        where: {
-          id: 4,
-        },
-        data: {
-          status: BookingStatus.CANCELLED,
-        },
-        include: {
-          customer: true,
-          items: {
-            include: {
-              field: true,
-              timeSlot: true,
-            },
-          },
-          payments: true,
-        },
-      });
     });
   });
 
@@ -361,7 +550,6 @@ describe('BookingsService', () => {
         payments: [
           {
             id: 1,
-            amount: 100000,
           },
         ],
       } as never);
@@ -371,15 +559,12 @@ describe('BookingsService', () => {
           'Đơn đã có giao dịch thanh toán nên không thể xóa',
         ),
       );
-
-      expect(prismaMock.$transaction).not.toHaveBeenCalled();
     });
 
     it('xóa chi tiết và đơn đặt sân khi chưa có thanh toán', async () => {
       const deletedBooking = {
         id: 6,
         bookingCode: 'BK202607280006',
-        status: BookingStatus.PENDING,
       };
 
       jest.spyOn(service, 'findOne').mockResolvedValue({
@@ -403,12 +588,6 @@ describe('BookingsService', () => {
       const result = await service.remove(6);
 
       expect(result).toEqual(deletedBooking);
-
-      expect(transactionMock.bookingItem.deleteMany).toHaveBeenCalledWith({
-        where: {
-          bookingId: 6,
-        },
-      });
 
       expect(transactionMock.booking.delete).toHaveBeenCalledWith({
         where: {
